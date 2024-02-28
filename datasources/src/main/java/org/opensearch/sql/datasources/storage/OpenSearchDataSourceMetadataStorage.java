@@ -18,10 +18,13 @@ import java.util.Optional;
 import org.apache.commons.io.IOUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.core.appender.rolling.action.IfAll;
 import org.opensearch.action.DocWriteRequest;
 import org.opensearch.action.DocWriteResponse;
 import org.opensearch.action.admin.indices.create.CreateIndexRequest;
 import org.opensearch.action.admin.indices.create.CreateIndexResponse;
+import org.opensearch.action.admin.indices.get.GetIndexRequest;
+import org.opensearch.action.admin.indices.get.GetIndexResponse;
 import org.opensearch.action.delete.DeleteRequest;
 import org.opensearch.action.delete.DeleteResponse;
 import org.opensearch.action.index.IndexRequest;
@@ -36,6 +39,7 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.common.xcontent.XContentType;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.engine.DocumentMissingException;
 import org.opensearch.index.engine.VersionConflictEngineException;
 import org.opensearch.index.query.QueryBuilder;
@@ -88,8 +92,8 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
 
   @Override
   public Optional<DataSourceMetadata> getDataSourceMetadata(String datasourceName) {
-    if (!this.clusterService.state().routingTable().hasIndex(DATASOURCE_INDEX_NAME)) {
-      createDataSourcesIndex();
+    Client osClient = client.getRemoteClusterClient("remote");
+    if (!createIndexIfNotExists(osClient)) {
       return Optional.empty();
     }
     // todo, in case docId == datasourceName, could read doc directly.
@@ -101,10 +105,9 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
 
   @Override
   public void createDataSourceMetadata(DataSourceMetadata dataSourceMetadata) {
+    Client osClient = client.getRemoteClusterClient("remote");
     encryptDecryptAuthenticationData(dataSourceMetadata, true);
-    if (!this.clusterService.state().routingTable().hasIndex(DATASOURCE_INDEX_NAME)) {
-      createDataSourcesIndex();
-    }
+    createIndexIfNotExists(osClient);
     IndexRequest indexRequest = new IndexRequest(DATASOURCE_INDEX_NAME);
     indexRequest.id(dataSourceMetadata.getName());
     indexRequest.opType(DocWriteRequest.OpType.CREATE);
@@ -112,9 +115,9 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
     ActionFuture<IndexResponse> indexResponseActionFuture;
     IndexResponse indexResponse;
     try (ThreadContext.StoredContext storedContext =
-        client.threadPool().getThreadContext().stashContext()) {
+                 osClient.threadPool().getThreadContext().stashContext()) {
       indexRequest.source(XContentParserUtils.convertToXContent(dataSourceMetadata));
-      indexResponseActionFuture = client.index(indexRequest);
+      indexResponseActionFuture = osClient.index(indexRequest);
       indexResponse = indexResponseActionFuture.actionGet();
     } catch (VersionConflictEngineException exception) {
       throw new IllegalArgumentException(
@@ -130,6 +133,20 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
           "Saving dataSource metadata information failed with result : "
               + indexResponse.getResult().getLowercase());
     }
+  }
+
+  private boolean createIndexIfNotExists(Client osClient) {
+    GetIndexRequest getIndexRequest = new GetIndexRequest();
+    getIndexRequest.indices(DATASOURCE_INDEX_NAME);
+    ActionFuture<GetIndexResponse> index = osClient.admin().indices().getIndex(getIndexRequest);
+    GetIndexResponse getIndexResponse = index.actionGet();
+    // TODO: Update cluster state with remote cluster state to avoid fetching index details with every call.
+    if (getIndexResponse == null && getIndexResponse.getIndices().length == 0) {
+      createDataSourcesIndex();
+      return false;
+    }
+
+    return true;
   }
 
   @Override
@@ -184,6 +201,7 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
   }
 
   private void createDataSourcesIndex() {
+    Client osClient = client.getRemoteClusterClient("remote");
     try {
       InputStream mappingFileStream =
           OpenSearchDataSourceMetadataStorage.class
@@ -201,7 +219,7 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
       ActionFuture<CreateIndexResponse> createIndexResponseActionFuture;
       try (ThreadContext.StoredContext ignored =
           client.threadPool().getThreadContext().stashContext()) {
-        createIndexResponseActionFuture = client.admin().indices().create(createIndexRequest);
+        createIndexResponseActionFuture = osClient.admin().indices().create(createIndexRequest);
       }
       CreateIndexResponse createIndexResponse = createIndexResponseActionFuture.actionGet();
       if (createIndexResponse.isAcknowledged()) {
@@ -219,6 +237,7 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
   }
 
   private List<DataSourceMetadata> searchInDataSourcesIndex(QueryBuilder query) {
+    Client osClient = client.getRemoteClusterClient("remote");
     SearchRequest searchRequest = new SearchRequest();
     searchRequest.indices(DATASOURCE_INDEX_NAME);
     SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
@@ -229,8 +248,8 @@ public class OpenSearchDataSourceMetadataStorage implements DataSourceMetadataSt
     searchRequest.preference("_primary_first");
     ActionFuture<SearchResponse> searchResponseActionFuture;
     try (ThreadContext.StoredContext ignored =
-        client.threadPool().getThreadContext().stashContext()) {
-      searchResponseActionFuture = client.search(searchRequest);
+                 osClient.threadPool().getThreadContext().stashContext()) {
+      searchResponseActionFuture = osClient.search(searchRequest);
     }
     SearchResponse searchResponse = searchResponseActionFuture.actionGet();
     if (searchResponse.status().getStatus() != 200) {

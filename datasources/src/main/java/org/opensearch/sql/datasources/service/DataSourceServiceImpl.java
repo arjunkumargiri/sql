@@ -51,6 +51,7 @@ public class DataSourceServiceImpl implements DataSourceService {
 
   @Override
   public Set<DataSourceMetadata> getDataSourceMetadata(boolean isDefaultDataSourceRequired) {
+
     List<DataSourceMetadata> dataSourceMetadataList =
         this.dataSourceMetadataStorage.getDataSourceMetadata();
     Set<DataSourceMetadata> dataSourceMetadataSet = new HashSet<>(dataSourceMetadataList);
@@ -77,6 +78,7 @@ public class DataSourceServiceImpl implements DataSourceService {
 
   @Override
   public void createDataSource(DataSourceMetadata metadata) {
+
     validateDataSourceMetaData(metadata);
     if (!metadata.getName().equals(DEFAULT_DATASOURCE_NAME)) {
       this.dataSourceLoaderCache.getOrLoadDataSource(metadata);
